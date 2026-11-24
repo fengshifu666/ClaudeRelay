@@ -1,0 +1,68 @@
+name: binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build Windows binary
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/ClaudeRelay-${VERSION}-windows-amd64"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -trimpath -buildvcs=false \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "dist/ClaudeRelay-${VERSION}-windows-amd64/ClaudeRelay.exe" \
+            ./cmd/server
+          cp config.example.json README.md LICENSE "dist/ClaudeRelay-${VERSION}-windows-amd64/"
+          (cd "dist/ClaudeRelay-${VERSION}-windows-amd64" && zip -q "../ClaudeRelay-${VERSION}-windows-amd64.zip" ./*)
+          (cd dist && sha256sum "ClaudeRelay-${VERSION}-windows-amd64.zip" > SHA256SUMS.txt)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeRelay-${{ env.VERSION }}-windows-amd64
+          path: |
+            dist/ClaudeRelay-${{ env.VERSION }}-windows-amd64.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" \
+            "dist/ClaudeRelay-${VERSION}-windows-amd64.zip" \
+            "dist/SHA256SUMS.txt" \
+            --title "v${VERSION}" \
+            --generate-notes

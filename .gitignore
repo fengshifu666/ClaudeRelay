@@ -1,0 +1,19 @@
+# Build output
+/dist/
+*.exe
+
+# Local runtime configuration and secrets
+/config.json
+.env
+.env.*
+
+# Go test/build artifacts
+*.test
+*.out
+coverage.*
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
