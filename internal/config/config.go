@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const DefaultMaxRequestBytes int64 = 64 << 20
+const DefaultMaxRequestBytes int64 = 200 << 20
 
 type Model struct {
 	ID          string `json:"id"`

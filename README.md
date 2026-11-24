@@ -154,7 +154,7 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
   "listenHost": "127.0.0.1",
   "listenPort": 17863,
   "upstreamBaseUrl": "http://127.0.0.1:7863",
-  "maxRequestBytes": 67108864,
+  "maxRequestBytes": 209715200,
   "defaultUpstreamModel": "cn:deepseek-v4.1-flash",
   "modelAliases": {
     "claude-fable-5": "cn:deepseek-v4.1-flash"
@@ -174,7 +174,7 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
 | `listenHost` | string | 监听地址，默认 `127.0.0.1` |
 | `listenPort` | number | 监听端口，示例为 `17863` |
 | `upstreamBaseUrl` | string | 上游网关根地址，只支持 `http` / `https` |
-| `maxRequestBytes` | number | 最大请求体字节数，默认 64 MB |
+| `maxRequestBytes` | number | 最大请求体字节数，默认 200 MiB |
 | `defaultUpstreamModel` | string | 未知客户端模型使用的回退上游模型 |
 | `modelAliases` | object | 客户端模型 ID 到上游模型 ID 的映射 |
 | `models` | array | `/v1/models` 返回给客户端的模型目录 |
