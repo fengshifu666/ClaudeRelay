@@ -55,8 +55,8 @@
                                                     │ 改写 model 字段
                                                     ▼
                                        ┌──────────────────────────┐
-                                       │ 第三方网关 / Anthropic API │
-                                       │ 例如 127.0.0.1:7863       │
+                                       │ workbuddy2api 等上游网关   │
+                                       │ 例如 127.0.0.1:8787       │
                                        └──────────────────────────┘
 ```
 
@@ -66,10 +66,10 @@
 客户端请求 model = claude-fable-5
              │
              ▼
-ClaudeRelay 改写 model = cn:deepseek-v4.1-flash
+ClaudeRelay 改写 model = deepseek-v4-pro
              │
              ▼
-转发到 http://127.0.0.1:7863
+转发到 http://127.0.0.1:8787
 ```
 
 同时，ClaudeRelay 的 `/v1/models` 会返回：
@@ -83,6 +83,64 @@ ClaudeRelay 改写 model = cn:deepseek-v4.1-flash
 ```
 
 客户端读取模型目录后即可显示 **Fable 5.2**。
+
+## 典型上游：workbuddy2api
+
+本项目最常见的用法是作为 **workbuddy2api** 的前置网关。workbuddy2api 把腾讯 WorkBuddy / CodeBuddy 的登录态转成本机可用的 OpenAI / Anthropic 兼容 API，ClaudeRelay 接在它前面，负责两件它不做的事：
+
+1. **模型名映射**——workbuddy2api 要求客户端填腾讯后端的真实模型名（`glm-5.2`、`deepseek-v4-pro`、`kimi-k2.7`、`auto` 等），不做自动映射。ClaudeRelay 让客户端只看到 `claude-fable-5` 这类固定别名，转发时再改写成真实模型名。
+2. **模型目录**——workbuddy2api 的 `/v1/models` 不一定符合 Claude Desktop 的期望，ClaudeRelay 用 `config.json` 里的 `models` 数组直接给出目录和显示名。
+
+> [!IMPORTANT]
+> ClaudeRelay 只做协议转发和名字映射，**不绕过 workbuddy2api 的任何鉴权或风控**。workbuddy2api 需要的鉴权头（含 `X-Device-Token` 等）由它自己处理；ClaudeRelay 把客户端传来的请求头原样转发。
+
+### 要确认的三件事
+
+| 项 | 怎么查 | 说明 |
+| --- | --- | --- |
+| 上游地址 | workbuddy2api 启动日志里的监听端口 | 本机直连默认 `http://127.0.0.1:8787`；共享平台默认 `http://127.0.0.1:8790` |
+| 真实模型名 | 它的文档或管理面板的模型列表 | 填进 `modelAliases` 的值；写错会得到上游的 400 或 404 |
+| 鉴权方式 | 启动时是否带 `--api-key` | 不带时 API Key 可以留空；带了就要把同一把 Key 配给客户端，ClaudeRelay 会原样透传 |
+
+### 配置示例
+
+```json
+{
+  "listenHost": "127.0.0.1",
+  "listenPort": 17863,
+  "upstreamBaseUrl": "http://127.0.0.1:8787",
+  "responseHeaderTimeoutSeconds": 60,
+  "defaultUpstreamModel": "auto",
+  "modelAliases": {
+    "claude-fable-5": "deepseek-v4-pro",
+    "claude-sonnet-5": "glm-5.2",
+    "claude-haiku-5-5": "kimi-k2.7"
+  },
+  "models": [
+    { "id": "claude-fable-5",  "displayName": "Fable 5.2",   "createdAt": "2025-01-01T00:00:00Z" },
+    { "id": "claude-sonnet-5", "displayName": "Sonnet 5",    "createdAt": "2025-01-01T00:00:00Z" },
+    { "id": "claude-haiku-5-5","displayName": "Haiku 5.5",   "createdAt": "2025-01-01T00:00:00Z" }
+  ]
+}
+```
+
+说明：
+
+- `modelAliases` 的**键**必须是 `claude-sonnet-*` / `claude-opus-*` / `claude-haiku-*` / `claude-fable-*` 形态，Claude Desktop 只认这四族模型 ID；**值**是 workbuddy2api 侧的真实模型名。
+- `defaultUpstreamModel` 建议填 `auto`（若上游支持），这样客户端请求任何未列出的模型名时都有一个能用的回退，而不是把未知名字直接发给上游报错。
+- 三档可以只配一档，但不配的档位会落到 `defaultUpstreamModel`。Claude Desktop 自己会额外请求 Opus 档（安全分类器）和 Haiku 档（子代理），只配一档时它们都会走默认模型。
+
+### 与 CC Switch 的关系
+
+如果同时用 CC Switch 管理 Claude Desktop，可以不启用它的"模型映射"（那会占用它的本地路由端口），而是在 CC Switch 里把 provider 指向 ClaudeRelay：
+
+```text
+Base URL: http://127.0.0.1:17863
+Model:    claude-fable-5
+API Key:  workbuddy2api 启动时配置的 Key（没有就留空）
+```
+
+这样 CC Switch 负责切换和写 Desktop 配置，ClaudeRelay 负责名字映射和目录，两者职责不重叠。
 
 ## 快速开始
 
@@ -100,10 +158,12 @@ Copy-Item .\config.example.json .\dist\config.json
 ```json
 {
   "listenPort": 17863,
-  "upstreamBaseUrl": "http://127.0.0.1:7863",
-  "defaultUpstreamModel": "cn:deepseek-v4.1-flash"
+  "upstreamBaseUrl": "http://127.0.0.1:8787",
+  "defaultUpstreamModel": "auto"
 }
 ```
+
+`upstreamBaseUrl` 填 workbuddy2api 的监听地址（本机直连默认 8787，共享平台默认 8790），详见 [典型上游：workbuddy2api](#典型上游workbuddy2api)。
 
 ### 2. 构建二进制
 
@@ -155,12 +215,12 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
 {
   "listenHost": "127.0.0.1",
   "listenPort": 17863,
-  "upstreamBaseUrl": "http://127.0.0.1:7863",
+  "upstreamBaseUrl": "http://127.0.0.1:8787",
   "maxRequestBytes": 209715200,
   "responseHeaderTimeoutSeconds": 60,
-  "defaultUpstreamModel": "cn:deepseek-v4.1-flash",
+  "defaultUpstreamModel": "auto",
   "modelAliases": {
-    "claude-fable-5": "cn:deepseek-v4.1-flash"
+    "claude-fable-5": "deepseek-v4-pro"
   },
   "models": [
     {
@@ -176,13 +236,13 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
 | --- | --- | --- |
 | `listenHost` | string | 监听地址，默认 `127.0.0.1` |
 | `listenPort` | number | 监听端口，示例为 `17863` |
-| `upstreamBaseUrl` | string | 上游网关根地址，只支持 `http` / `https` |
+| `upstreamBaseUrl` | string | 上游网关根地址，只支持 `http` / `https`；workbuddy2api 默认 `http://127.0.0.1:8787` |
 | `maxRequestBytes` | number | 最大请求体字节数，默认 200 MiB |
 | `responseHeaderTimeoutSeconds` | number | 等待上游返回响应头的秒数，默认 60；`0` 表示不限 |
-| `defaultUpstreamModel` | string | 未知客户端模型使用的回退上游模型 |
-| `modelAliases` | object | 客户端模型 ID 到上游模型 ID 的映射 |
+| `defaultUpstreamModel` | string | 未知客户端模型使用的回退上游模型；workbuddy2api 可填 `auto` |
+| `modelAliases` | object | 客户端模型 ID 到上游模型 ID 的映射；键须为 `claude-{sonnet\|opus\|haiku\|fable}-*` 形态 |
 | `models` | array | `/v1/models` 返回给客户端的模型目录 |
-| `models[].id` | string | 客户端使用的模型 ID |
+| `models[].id` | string | 客户端使用的模型 ID；Claude Desktop 只接受 `claude-sonnet-*` / `claude-opus-*` / `claude-haiku-*` / `claude-fable-*` 形态，其他形态可能被整组拒收 |
 | `models[].displayName` | string | 客户端界面显示名 |
 | `models[].createdAt` | string | RFC 3339 时间字符串 |
 
@@ -224,7 +284,7 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
 
 ```json
 {
-  "model": "cn:deepseek-v4.1-flash",
+  "model": "deepseek-v4-pro",
   "max_tokens": 1024,
   "messages": [
     { "role": "user", "content": "Hello" }
@@ -456,9 +516,28 @@ Invoke-RestMethod http://127.0.0.1:17863/health
 - 端口、协议和路径前缀正确
 - 上游需要的认证头由客户端正常传入
 
+### 上游返回 401 / 403（workbuddy2api）
+
+- 如果启动 workbuddy2api 时带了 `--api-key`，客户端的 API Key 必须与它一致——ClaudeRelay 原样透传，不做替换。
+- 如果 Key 正确仍然 401，检查 workbuddy2api 自己的登录态是否过期（它读取的是本机 WorkBuddy 桌面端登录态）。
+- ClaudeRelay 不参与、也不能修复 workbuddy2api 的鉴权与风控。
+
+### 上游返回 400 / 404，提示模型不存在（workbuddy2api）
+
+- `modelAliases` 的值必须是 workbuddy2api 侧**真实**的模型名（`glm-5.2`、`deepseek-v4-pro`、`kimi-k2.7`、`auto` 等），写错名字上游会直接拒绝。
+- 别名表里没有的模型名会落到 `defaultUpstreamModel`。建议显式配成 `auto`，否则未知名字会原样发给上游。
+
+### 请求在约 60 秒后返回 502，错误提到超时
+
+这是 `responseHeaderTimeoutSeconds` 在生效：上游连接建立了但迟迟不返回响应头。排查：
+
+- workbuddy2api 是否还在运行、账号额度是否耗尽
+- 上游是否把请求排在了很长的队列后面
+- 确实需要长时间等首字节时（例如极长的非流式请求），把 `responseHeaderTimeoutSeconds` 调大或设为 `0`
+
 ### 配置解析失败
 
-确认 `config.json` 是合法 JSON，且 `listenPort` 位于 `1-65535`。
+确认 `config.json` 是合法 JSON，且 `listenPort` 位于 `1-65535`，`responseHeaderTimeoutSeconds` 不小于 0。
 
 ## 安全说明
 
