@@ -11,6 +11,12 @@ import (
 
 const DefaultMaxRequestBytes int64 = 200 << 20
 
+// DefaultResponseHeaderTimeoutSeconds caps how long the relay waits for the
+// upstream to start responding. Streamed responses send their headers almost
+// immediately, so a stalled upstream is detectable within a minute. Set the
+// config field to 0 to disable the limit.
+const DefaultResponseHeaderTimeoutSeconds = 60
+
 type Model struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName"`
@@ -25,6 +31,9 @@ type Config struct {
 	DefaultUpstreamModel string            `json:"defaultUpstreamModel"`
 	ModelAliases         map[string]string `json:"modelAliases"`
 	Models               []Model           `json:"models"`
+	// ResponseHeaderTimeoutSeconds: nil uses the default, 0 disables the
+	// limit, and a positive value sets it.
+	ResponseHeaderTimeoutSeconds *int `json:"responseHeaderTimeoutSeconds"`
 }
 
 func Load(path string) (*Config, error) {
@@ -46,6 +55,13 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.MaxRequestBytes <= 0 {
 		cfg.MaxRequestBytes = DefaultMaxRequestBytes
+	}
+	if cfg.ResponseHeaderTimeoutSeconds == nil {
+		def := DefaultResponseHeaderTimeoutSeconds
+		cfg.ResponseHeaderTimeoutSeconds = &def
+	}
+	if *cfg.ResponseHeaderTimeoutSeconds < 0 {
+		return nil, fmt.Errorf("responseHeaderTimeoutSeconds must be 0 or greater")
 	}
 	if cfg.ModelAliases == nil {
 		cfg.ModelAliases = make(map[string]string)
@@ -80,4 +96,13 @@ func Load(path string) (*Config, error) {
 
 func (c *Config) ListenAddress() string {
 	return net.JoinHostPort(c.ListenHost, fmt.Sprintf("%d", c.ListenPort))
+}
+
+// ResponseHeaderTimeout returns the configured wait for upstream response
+// headers in seconds. Zero means no limit.
+func (c *Config) ResponseHeaderTimeout() int {
+	if c.ResponseHeaderTimeoutSeconds == nil {
+		return DefaultResponseHeaderTimeoutSeconds
+	}
+	return *c.ResponseHeaderTimeoutSeconds
 }

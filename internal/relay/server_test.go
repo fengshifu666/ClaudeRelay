@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"clauderelay/internal/config"
 )
@@ -336,5 +337,77 @@ func TestProxyRejectsOversizedRewriteBody(t *testing.T) {
 	}
 	if called {
 		t.Fatalf("upstream should not have been called")
+	}
+}
+
+func TestProxyTimesOutWhenUpstreamStalls(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // never respond until the test finishes
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	one := 1
+	cfg := &config.Config{
+		UpstreamBaseURL:              upstream.URL,
+		MaxRequestBytes:              1 << 20,
+		ResponseHeaderTimeoutSeconds: &one,
+	}
+	server, err := New(cfg, "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	front := httptest.NewServer(server.Handler())
+	defer front.Close()
+
+	start := time.Now()
+	resp, err := http.Post(front.URL+"/v1/files", "application/octet-stream", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("request took %v; the timeout did not fire", elapsed)
+	}
+}
+
+func TestProxyZeroTimeoutWaitsForSlowUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	zero := 0
+	cfg := &config.Config{
+		UpstreamBaseURL:              upstream.URL,
+		MaxRequestBytes:              1 << 20,
+		ResponseHeaderTimeoutSeconds: &zero,
+	}
+	server, err := New(cfg, "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	front := httptest.NewServer(server.Handler())
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/v1/files", "application/octet-stream", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; a disabled timeout should not fail a slow upstream", resp.StatusCode)
 	}
 }

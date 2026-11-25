@@ -68,6 +68,11 @@ func New(cfg *config.Config, version string) (*Server, error) {
 		ExpectContinueTimeout: time.Second,
 		DisableCompression:    true,
 	}
+	// Only the wait for response headers is bounded. Once the upstream starts
+	// responding, a streamed response may run for as long as it needs.
+	if timeoutSeconds := cfg.ResponseHeaderTimeout(); timeoutSeconds > 0 {
+		transport.ResponseHeaderTimeout = time.Duration(timeoutSeconds) * time.Second
+	}
 
 	return &Server{
 		cfg:     cfg,
