@@ -32,8 +32,10 @@
 
 - Anthropic Messages API 兼容转发
 - `/v1/messages`、`/v1/messages/count_tokens` 请求中的模型名改写
+- 模型名改写只替换 `model` 字段的字节区间，请求体其余部分逐字节原样转发
 - `/v1/models` 返回自定义模型 ID 和显示名
 - 流式响应边接收边返回，支持 SSE
+- 不需要改写模型的请求体直接流式透传，不整体缓冲到内存
 - 未知模型可回退到统一上游模型
 - 其他 API 路径透明转发到上游
 - 单文件 Go 二进制，不内置 Node.js 运行时
@@ -253,6 +255,13 @@ Invoke-RestMethod http://127.0.0.1:17863/health
 Invoke-RestMethod http://127.0.0.1:17863/v1/models
 ```
 
+## 内存与转发行为
+
+- 只有 `POST /v1/messages` 和 `POST /v1/messages/count_tokens` 且 `Content-Type` 为 JSON 时，请求体才会被读入内存并改写模型名。
+- 模型名改写通过定位顶层 `model` 字段的字节区间，直接拼接替换值实现，不会把整个请求解析成结构化对象。请求体中的其他字节（消息、图片、工具定义、字段顺序和数字格式）原样保留。
+- 其他所有请求（如文件上传、其他 API 路径）的请求体直接流式转发到上游，不整体缓冲，`maxRequestBytes` 对它们不生效。
+- 因此，`maxRequestBytes` 只限制需要改写模型的请求体大小；超限返回 413。
+
 ## 构建与测试
 
 ```powershell
@@ -403,8 +412,8 @@ ClaudeRelay/
 - `LICENSE`：MIT License
 - `cmd/server`：程序入口、信号处理和服务启动
 - `internal/config`：配置加载与校验
-- `internal/relay/server.go`：HTTP 转发、模型改写、流式响应
-- `internal/relay/server_test.go`：模型映射和模型目录单元测试
+- `internal/relay/server.go`：HTTP 转发、模型改写（字节级替换）、流式透传与流式响应
+- `internal/relay/server_test.go`：模型映射、字节级改写、端到端转发与流式透传测试
 - `config.example.json`：可公开提交的示例配置
 - `config.json`：本地实际配置，不提交到仓库
 
