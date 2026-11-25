@@ -134,35 +134,50 @@ func (s *Server) handleModels(w http.ResponseWriter) {
 }
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
-	body, err := readBody(r, s.cfg.MaxRequestBytes)
-	if err != nil {
-		if errors.Is(err, errRequestTooLarge) {
-			writeAPIError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
-			return
-		}
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-
-	rewritten, err := rewriteModel(body, r.Header.Get("Content-Type"), r.URL.Path, s.cfg)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "failed to decode JSON request body")
-		return
-	}
-
 	target := *s.baseURL
 	target.Path = joinURLPath(s.baseURL.Path, r.URL.Path)
 	target.RawPath = ""
 	target.RawQuery = r.URL.RawQuery
 
-	outbound, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(rewritten.body))
+	var (
+		body    io.Reader
+		bodyLen int64 = r.ContentLength
+	)
+	if needsRewrite(r.Header.Get("Content-Type"), r.URL.Path) {
+		buffered, err := readBody(r, s.cfg.MaxRequestBytes)
+		if err != nil {
+			if errors.Is(err, errRequestTooLarge) {
+				writeAPIError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+				return
+			}
+			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+
+		rewritten, err := rewriteModel(buffered, r.Header.Get("Content-Type"), r.URL.Path, s.cfg)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "failed to decode JSON request body")
+			return
+		}
+		body = bytes.NewReader(rewritten.body)
+		bodyLen = int64(len(rewritten.body))
+	} else {
+		// No rewrite is needed, so stream the body straight through instead of
+		// holding the whole thing in memory. Uploads can be large.
+		body = r.Body
+		if r.Body != nil {
+			defer r.Body.Close()
+		}
+	}
+
+	outbound, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), body)
 	if err != nil {
 		writeAPIError(w, http.StatusBadGateway, "api_error", "failed to create upstream request")
 		return
 	}
 	copyHeaders(outbound.Header, r.Header)
 	outbound.Header.Del("Content-Length")
-	outbound.ContentLength = int64(len(rewritten.body))
+	outbound.ContentLength = bodyLen
 
 	response, err := s.client.Do(outbound)
 	if err != nil {
@@ -182,21 +197,28 @@ type rewrittenBody struct {
 	upstreamModel  string
 }
 
+// needsRewrite reports whether a request body has to be buffered and inspected
+// for a model rewrite. Anything else is streamed straight to the upstream.
+func needsRewrite(contentType, pathname string) bool {
+	return isJSONContentType(contentType) && isMessagePath(pathname)
+}
+
 func rewriteModel(body []byte, contentType, pathname string, cfg *config.Config) (rewrittenBody, error) {
 	result := rewrittenBody{body: body}
-	if len(body) == 0 || !isJSONContentType(contentType) || !isMessagePath(pathname) {
+	if len(body) == 0 || !needsRewrite(contentType, pathname) {
 		return result, nil
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	var payload map[string]any
-	if err := decoder.Decode(&payload); err != nil {
+	// Only the top-level "model" value is ever changed, so locate its byte span
+	// and splice a new JSON string into the original body. Decoding the whole
+	// request into a map and re-encoding it would double or triple peak memory
+	// on large bodies (images, long histories) that are otherwise passed through
+	// untouched.
+	span, requested, ok, err := findTopLevelModelString(body)
+	if err != nil {
 		return result, err
 	}
-
-	requested, ok := payload["model"].(string)
-	if !ok || strings.TrimSpace(requested) == "" {
+	if !ok {
 		return result, nil
 	}
 
@@ -207,16 +229,92 @@ func rewriteModel(body []byte, contentType, pathname string, cfg *config.Config)
 	if upstream == "" {
 		upstream = requested
 	}
+	if upstream == requested {
+		result.requestedModel = requested
+		result.upstreamModel = requested
+		return result, nil
+	}
 
-	payload["model"] = upstream
-	encoded, err := json.Marshal(payload)
+	encodedModel, err := json.Marshal(upstream)
 	if err != nil {
 		return result, err
 	}
-	result.body = encoded
+
+	spliced := make([]byte, 0, len(body)+len(encodedModel))
+	spliced = append(spliced, body[:span.start]...)
+	spliced = append(spliced, encodedModel...)
+	spliced = append(spliced, body[span.end:]...)
+	if !json.Valid(spliced) {
+		return result, errors.New("model rewrite produced invalid JSON")
+	}
+
+	result.body = spliced
 	result.requestedModel = requested
 	result.upstreamModel = upstream
 	return result, nil
+}
+
+type byteSpan struct {
+	start int64
+	end   int64
+}
+
+// findTopLevelModelString returns the byte span of the top-level "model" value
+// and its decoded string value. When the key appears more than once, the last
+// occurrence wins, matching the behavior of json.Unmarshal into a map.
+func findTopLevelModelString(body []byte) (byteSpan, string, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+
+	token, err := decoder.Token()
+	if err != nil {
+		return byteSpan{}, "", false, err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '{' {
+		// Not a JSON object: nothing to rewrite.
+		return byteSpan{}, "", false, nil
+	}
+
+	var (
+		last       byteSpan
+		value      string
+		found      bool
+		lastIsText bool
+	)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return byteSpan{}, "", false, err
+		}
+		key, isString := keyToken.(string)
+		isModel := isString && key == "model"
+
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return byteSpan{}, "", false, err
+		}
+
+		if isModel {
+			start := decoder.InputOffset() - int64(len(raw))
+			last = byteSpan{start: start, end: start + int64(len(raw))}
+			found = true
+			var str string
+			lastIsText = json.Unmarshal(raw, &str) == nil
+			value = str
+		}
+	}
+
+	if _, err := decoder.Token(); err != nil {
+		return byteSpan{}, "", false, err
+	}
+
+	if !found || !lastIsText {
+		return byteSpan{}, "", false, nil
+	}
+	if strings.TrimSpace(value) == "" {
+		return byteSpan{}, "", false, nil
+	}
+	return last, value, true, nil
 }
 
 func isJSONContentType(value string) bool {
