@@ -3,6 +3,7 @@
   "listenPort": 17863,
   "upstreamBaseUrl": "http://127.0.0.1:7863",
   "maxRequestBytes": 209715200,
+  "responseHeaderTimeoutSeconds": 60,
   "defaultUpstreamModel": "cn:deepseek-v4.1-flash",
   "modelAliases": {
     "claude-fable-5": "cn:deepseek-v4.1-flash"

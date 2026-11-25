@@ -157,6 +157,7 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
   "listenPort": 17863,
   "upstreamBaseUrl": "http://127.0.0.1:7863",
   "maxRequestBytes": 209715200,
+  "responseHeaderTimeoutSeconds": 60,
   "defaultUpstreamModel": "cn:deepseek-v4.1-flash",
   "modelAliases": {
     "claude-fable-5": "cn:deepseek-v4.1-flash"
@@ -177,6 +178,7 @@ ClaudeRelay 和参考项目一样，**二进制本身不自带守护，也不附
 | `listenPort` | number | 监听端口，示例为 `17863` |
 | `upstreamBaseUrl` | string | 上游网关根地址，只支持 `http` / `https` |
 | `maxRequestBytes` | number | 最大请求体字节数，默认 200 MiB |
+| `responseHeaderTimeoutSeconds` | number | 等待上游返回响应头的秒数，默认 60；`0` 表示不限 |
 | `defaultUpstreamModel` | string | 未知客户端模型使用的回退上游模型 |
 | `modelAliases` | object | 客户端模型 ID 到上游模型 ID 的映射 |
 | `models` | array | `/v1/models` 返回给客户端的模型目录 |
@@ -261,6 +263,7 @@ Invoke-RestMethod http://127.0.0.1:17863/v1/models
 - 模型名改写通过定位顶层 `model` 字段的字节区间，直接拼接替换值实现，不会把整个请求解析成结构化对象。请求体中的其他字节（消息、图片、工具定义、字段顺序和数字格式）原样保留。
 - 其他所有请求（如文件上传、其他 API 路径）的请求体直接流式转发到上游，不整体缓冲，`maxRequestBytes` 对它们不生效。
 - 因此，`maxRequestBytes` 只限制需要改写模型的请求体大小；超限返回 413。
+- `responseHeaderTimeoutSeconds` 只限制“等上游返回响应头”的时间，默认 60 秒。一旦上游开始响应，流式传输可以持续任意久，不会被这个值截断。上游卡死时，请求会在超时后返回 502，而不是无限等待。设为 `0` 关闭该限制（不建议）。
 
 ## 构建与测试
 
