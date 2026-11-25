@@ -36,6 +36,7 @@
 - `/v1/models` 返回自定义模型 ID 和显示名
 - 流式响应边接收边返回，支持 SSE
 - 不需要改写模型的请求体直接流式透传，不整体缓冲到内存
+- 上游响应头超时保护：默认 60 秒内未收到响应头则返回 502，避免请求无限挂起
 - 未知模型可回退到统一上游模型
 - 其他 API 路径透明转发到上游
 - 单文件 Go 二进制，不内置 Node.js 运行时
@@ -403,7 +404,8 @@ ClaudeRelay/
 │     └─ main.go
 └─ internal/
    ├─ config/
-   │  └─ config.go
+   │  ├─ config.go
+   │  └─ config_test.go
    └─ relay/
       ├─ server.go
       └─ server_test.go
@@ -415,8 +417,9 @@ ClaudeRelay/
 - `LICENSE`：MIT License
 - `cmd/server`：程序入口、信号处理和服务启动
 - `internal/config`：配置加载与校验
+- `internal/config/config_test.go`：配置默认值、取值范围与超时字段测试
 - `internal/relay/server.go`：HTTP 转发、模型改写（字节级替换）、流式透传与流式响应
-- `internal/relay/server_test.go`：模型映射、字节级改写、端到端转发与流式透传测试
+- `internal/relay/server_test.go`：模型映射、字节级改写、端到端转发、流式透传与超时测试
 - `config.example.json`：可公开提交的示例配置
 - `config.json`：本地实际配置，不提交到仓库
 
@@ -456,9 +459,21 @@ Invoke-RestMethod http://127.0.0.1:17863/health
 - 端口、协议和路径前缀正确
 - 上游需要的认证头由客户端正常传入
 
+### 请求在约 60 秒后返回 502，错误信息包含超时
+
+`responseHeaderTimeoutSeconds` 生效：上游连接已建立但迟迟没有返回响应头。依次排查：
+
+- 上游网关是否仍在运行，账号额度是否耗尽
+- 上游是否在排队处理大量请求
+- 确实需要长时间等待首字节时（例如极长的非流式请求），调大该值或设为 `0`
+
+### 上游返回 400 / 404，提示模型不存在
+
+`modelAliases` 的值必须等于上游网关实际支持的模型名。写错名字时上游会直接拒绝，ClaudeRelay 不做校验也不会自动纠正。别名表里没有的模型名会回退到 `defaultUpstreamModel`。
+
 ### 配置解析失败
 
-确认 `config.json` 是合法 JSON，且 `listenPort` 位于 `1-65535`。
+确认 `config.json` 是合法 JSON，`listenPort` 位于 `1-65535`，`responseHeaderTimeoutSeconds` 不小于 0。
 
 ## 安全说明
 
